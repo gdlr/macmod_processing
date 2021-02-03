@@ -1,0 +1,77 @@
+---
+title: "wavewatch_scraping"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(rNOMADS)
+library(here)
+```
+
+## Let's check and see if the wavewatch data is on here...
+
+"ftp://polar.ncep.noaa.gov/pub/history/waves/multi_1/200502/gribs/file..."
+
+This is a full link. What changes? The year (2005-2010), the month (1-12), and the filename.
+
+Filename...
+
+hs refers to the average waveheight. 
+
+YYYYMM is the date
+
+multi_1.at_4m.hs.200502.grb2 
+
+```{r}
+# Generate links:
+# Create a vector for the years and months
+year <- c(2005:2010, by = 1)
+month <- c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12")
+# Paste all combos of them together
+dates <- paste(rep(year, each = 12), month, sep = "")
+
+links <- NULL
+# Generate links!
+for(date in dates){
+  links[date] <- paste("ftp://polar.ncep.noaa.gov/pub/history/waves/multi_1/", date, "/gribs/multi_1.at_4m.hs.", date, ".grb2", sep = "")
+}
+
+# There's no data for Jan, 2005, so we gut that out...
+links_sub <- links[2:length(links)]
+```
+
+```{r}
+# Get these files!
+for(link in links_sub){
+download.file(link, destfile = basename(link))
+}
+```
+
+```{bash}
+cd
+# cd into current directory
+cd Desktop/Seaweed/macmod_processing/macmod_processing/raw_data/wavewatch_iii
+# use wgrib2 to convert to netcdf
+for file in *.grb2; do wgrib2 "$file" -netcdf "${file/%ext}".nc; done
+```
+
+```{r}
+# Generate a list of filenames..
+files <- list.files(here("raw_data", "wavewatch_iii"), pattern = ".nc")
+# Average wave heights for each month
+for(i in 1:length(files)){
+  # Brick all the 3 hour readings for a month
+  brick_t <- brick(here("raw_data", "wavewatch_iii", files[i]))
+  # Average them
+  t_avg <- calc(brick_t, fun = mean)
+  # Get the date as a name
+  name <- str_extract(files[i], pattern = "20....")
+  full_name <- paste(name, ".tif", sep = "")
+  # Save them
+  writeRaster(t_avg, here("scratch", "wavewatch", full_name), overwrite = TRUE)
+}
+```
+
