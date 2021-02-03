@@ -1,0 +1,361 @@
+---
+title: "macmod_processing"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(raster)
+library(tidyverse)
+library(sf)
+library(here)
+library(ncdf4)
+library(curl)
+library(stars)
+
+rasterOptions(maxmemory = 1e10,
+              progress = "text")
+```
+
+## This is a script that crops/masks all data layers to our region of interest (W. Florida gulf), and also resamples all rasters to a 5 km grid.
+
+
+### SABGOM
+Let's start by exploring the SABGOM model output, and making a few base rasters/shapefiles around this.
+
+```{r}
+## sabgom <- raster(here("raw_data", "CMS_SABGOM_Model_Simulations_1510", "data", "sabgom_output_2005_rho.nc4"))
+
+# Load in the sabgom data as a ncin file...
+sabgom_ncin <- nc_open(here("raw_data", "CMS_SABGOM_Model_Simulations_1510", "data", "sabgom_output_2005_rho.nc4"))
+
+# Pull a list of the variable names, keeping only the ones we want
+# This keeps DIC, DIN, and SST, along with Lat and Lon
+names <- names(sabgom_ncin$var[c(2, 3, 5, 6, 7)])
+
+# Pull all the values of lat/long as a list
+lon <- ncvar_get(ncin, "lon_rho")
+lat <- ncvar_get(ncin, "lat_rho")
+
+# Get the extent of the Sabgom models, using min/max lat lon from the above list
+sabgom_extent <- extent(min(lon),
+                        max(lon),
+                        min(lat),
+                        max(lat))
+
+# Then we can view a ton of attributes about this data
+# print(sabgom_ncin)
+# view(sabgom)
+
+# List all the file names we want to process.
+files <- list.files(here("raw_data", "CMS_SABGOM_Model_Simulations_1510", "data"), pattern = "*rho.nc4", full.names = TRUE)
+  
+# Let's create an area of interest for the West Florida domain...this is estimated, not from the model (I can't find it?)
+  wf_extent <- extent(-91, -80.5, 23, 38)
+  # plot(wf_extent)
+
+# start a function that will crop all these files
+crop_fx <- function(input_files){
+  # Open the input file...
+  ncin <- nc_open(input_files)
+  # We keep DIN, DIC, SST
+  var_list <- names(ncin$var[c(2,3,5)])
+  # We'll make a brick (and crop) function that we can apply to each variable
+  # Our dimensions are lat long, and time is the z dimension.
+  brick_fx <- function(variable){
+    brk <- brick(input_files, varname = variable)
+    # Change the extent of the brick to lat/lon
+    extent(brk) <- sabgom_extent
+    # Crop to west florida:
+    cropped <- crop(brk, wf_extent)
+    # Save the file
+    writeRaster(cropped, 
+                filename = here("output",
+                                paste0(tools::file_path_sans_ext(basename(input_files)),
+                                      "_",
+                                      variable,
+                                      ".tif")
+                                ),
+                overwrite = TRUE)
+  }
+  # run our function for each variable...
+  lapply(var_list, brick_fx)
+}
+
+# Run the function for each file.
+lapply(files, crop_fx)
+```
+
+```{r}
+# Make a template raster...
+test <- brick(here("output", "sabgom_output_2005_rho_DIC.tif"))
+# 
+# plot(test)
+# 
+# res(test)
+
+blank <- raster(ext = extent(test), resolution = res(test))
+writeRaster(blank, here("output", "base_raster_FL.tif"))
+
+plot(blank, col = black)
+```
+
+
+## PAR from MODIS
+
+These are OpenDAP links generated through the web browser for monthly averages.
+First, we download the data...
+
+```{r}
+par_list <- c(
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20050012005031.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20050322005059.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20050602005090.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20050912005120.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20051212005151.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20051522005181.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20051822005212.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20052132005243.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20052442005273.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20052742005304.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20053052005334.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20053352005365.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20060012006031.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20060322006059.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20060602006090.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20060912006120.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20061212006151.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20061522006181.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20061822006212.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20062132006243.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20062442006273.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20062742006304.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20063052006334.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20063352006365.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20070012007031.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20070322007059.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20070602007090.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20070912007120.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20071212007151.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20071522007181.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20071822007212.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20072132007243.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20072442007273.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20072742007304.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20073052007334.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20073352007365.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20080012008031.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20080322008060.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20080612008091.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20080922008121.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20081222008152.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20081532008182.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20081832008213.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20082142008244.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20082452008274.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20082752008305.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20083062008335.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20083362008366.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20090012009031.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20090322009059.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20090602009090.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20090912009120.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20091212009151.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20091522009181.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20091822009212.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20092132009243.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20092442009273.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20092742009304.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20093052009334.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20093352009365.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20100012010031.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20100322010059.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20100602010090.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20100912010120.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20101212010151.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20101522010181.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20101822010212.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20102132010243.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20102442010273.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20102742010304.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20103052010334.L3b_MO_PAR.nc",
+  "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20103352010365.L3b_MO_PAR.nc")
+
+# This doesn't download the whole file...
+
+for(url in par_list){
+  browseURL(url)
+  Sys.sleep(300)
+}
+
+## figure out which didn't download...
+lists <- list.files(here("raw_data", "PAR"))
+
+for(url in par_list){
+  if(!file.exists(file.path("..", "macmod_processing", "raw_data", "PAR", basename(url)))){
+    # print(url)
+    browseURL(url)
+    Sys.sleep(200)
+  }
+  else{
+    next
+  }
+}
+
+basename(par_list[3])
+
+basename(lists[3])
+
+```
+
+
+```{r}
+chl_files<- c("https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20050012005031.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20050322005059.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20050602005090.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20050912005120.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20051212005151.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20051522005181.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20051822005212.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20052132005243.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20052442005273.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20052742005304.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20053052005334.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20053352005365.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20060012006031.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20060322006059.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20060602006090.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20060912006120.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20061212006151.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20061522006181.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20061822006212.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20062132006243.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20062442006273.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20062742006304.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20063052006334.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20063352006365.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20070012007031.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20070322007059.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20070602007090.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20070912007120.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20071212007151.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20071522007181.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20071822007212.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20072132007243.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20072442007273.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20072742007304.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20073052007334.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20073352007365.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20080012008031.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20080322008060.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20080612008091.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20080922008121.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20081222008152.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20081532008182.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20081832008213.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20082142008244.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20082452008274.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20082752008305.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20083062008335.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20083362008366.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20090012009031.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20090322009059.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20090602009090.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20090912009120.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20091212009151.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20091522009181.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20091822009212.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20092132009243.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20092442009273.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20092742009304.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20093052009334.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20093352009365.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20100012010031.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20100322010059.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20100602010090.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20100912010120.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20101212010151.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20101522010181.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20101822010212.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20102132010243.L3b_MO_CHL.nc", "https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20102442010273.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20102742010304.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20103052010334.L3b_MO_CHL.nc",
+"https://oceandata.sci.gsfc.nasa.gov/cgi/getfile/A20103352010365.L3b_MO_CHL.nc")
+
+for(url in chl_files){
+  browseURL(url)
+  Sys.sleep(120)
+}
+    
+
+for(url in chl_files){
+  if(!file.exists(file.path("..", "macmod_processing", "raw_data", "Chl-A", basename(url)))){
+    # print(url)
+    browseURL(url)
+    Sys.sleep(200)
+  }
+  else{
+    next
+  }
+}
+    
+```    
+    
+Then, we can reconfigure, crop and mask thes, then resample them to a 5 degree grid.
+```{r}
+# First for chlorophyll...
+chl_filenames <- list.files(here("raw_data", "Chl-A"), full.names = TRUE)
+
+test <- nc_open(here("raw_data", "Chl-A", "A20050012005031.L3b_MO_CHL.nc"))
+
+## UGH
+
+
+resample_fx <- function(input_files){
+  # Open the input file...
+  ncin <- nc_open(input_files)
+  # We keep DIN, DIC, SST
+  var_list <- names(ncin$var[c(2,3,5)])
+  # We'll make a brick (and crop) function that we can apply to each variable
+  # Our dimensions are lat long, and time is the z dimension.
+  brick_fx <- function(variable){
+    brk <- brick(input_files, varname = variable)
+    # Change the extent of the brick to lat/lon
+    extent(brk) <- sabgom_extent
+    # Crop to west florida:
+    cropped <- crop(brk, wf_extent)
+    # Save the file
+    writeRaster(cropped, 
+                filename = here("output",
+                                paste0(tools::file_path_sans_ext(basename(input_files)),
+                                      "_",
+                                      variable,
+                                      ".tif")
+                                ),
+                overwrite = TRUE)
+  }
+  # run our function for each variable...
+  lapply(var_list, brick_fx)
+}
+
+
+```
+
+# Wavewatch processing
+```{r}
+# Write a function to crop, and reasample the wavewatch data:
+
+wavewatch_names <- list.files(here("scratch", "wavewatch"))
+
+wavewatch_fx <- function(file){
+  r <- raster(here("scratch", "wavewatch", file))
+  r_crop <- crop(r, wf_extent)
+  r_resample <- resample(r_crop, blank)
+  name <- paste(basename(tools::file_path_sans_ext(file)), ".crop", ".tif", sep = "")
+  writeRaster(r_resample, here("output", "wavewatch", name))
+}
+
+lapply(wavewatch_names, wavewatch_fx)
+```
+
